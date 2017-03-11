@@ -1,0 +1,78 @@
+DEVICE="/dev/disk3"
+KERNEL_PART="${DEVICE}s1"
+DATA_PART="${DEVICE}s2"
+TMP_MOUNT_KERNEL="/tmp/erlite-kernel"
+TMP_TAR_OUTPUT="/tmp/erlite-tar"
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+RELEASE="17.01.0-rc2-r3131-42f3c1f"
+TAR_FILE="lede-${RELEASE}-octeon-erlite-squashfs-sysupgrade.tar"
+
+cleanMounts() {
+  diskutil quiet umount "$KERNEL_PART"
+}
+
+cleanupDirs() {
+  echo "Cleaning Up"
+  #[ -d "$TMP_MOUNT_KERNEL" ] && rm -Rf "$TMP_MOUNT_KERNEL"
+  [ -d "$TMP_TAR_OUTPUT" ] && rm -Rf "$TMP_TAR_OUTPUT"
+}
+
+ctrl_c() {
+  echo "Caught ctrl-c!"
+  cleanMounts
+  cleanupDirs
+  exit 1
+}
+
+trap ctrl_c INT
+
+#check is script has been run as root /sudo
+if [[ $UID != 0 ]]; then
+	echo "Looks like your not running the script using sudo, we will do it for you"
+	RESULT=`sudo -p "Please enter your user password so we can gain root privileges: " echo > /dev/null`
+	if [[ $? != 0 ]]; then
+		echo "ERROR: We were unable to get root privileges!"
+		echo "       try running the script with sudo"
+		exit 1
+	fi
+fi
+
+echo "Extracting tar file"
+[ -f "$TAR_FILE" ] || (echo "Failed to find tar file!"; exit 1)
+[ -d "$TMP_TAR_OUTPUT" ] || mkdir -p "$TMP_TAR_OUTPUT"
+tar xf "$TAR_FILE" --strip-components=1 -C "${TMP_TAR_OUTPUT}"
+
+echo "Formatting Disk"
+diskutil quiet unmountDisk "$DEVICE"
+diskutil quiet partitionDisk "$DEVICE" 2 MBRFormat \
+        "MS-DOS FAT32" "KERNEL" 142M \
+        "MS-DOS FAT32" "DATA" R
+
+diskutil quiet unmountDisk "$DEVICE"
+[ -d "$TMP_MOUNT_KERNEL" ] && rm -Rf "$TMP_MOUNT_KERNEL"
+[ -d "$TMP_MOUNT_KERNEL" ] || mkdir -p "$TMP_MOUNT_KERNEL"
+echo "Mounting Kernel Partition"
+diskutil mount -mountPoint "$TMP_MOUNT_KERNEL" "$KERNEL_PART"
+
+echo "Copying Kernel to usb drive"
+cp "${TMP_TAR_OUTPUT}/kernel" "${TMP_MOUNT_KERNEL}/vmlinux.64"
+
+MD5Sum=`md5sum "${TMP_MOUNT_KERNEL}/vmlinux.64" | cut -d " " -f 1 | sudo tee "${TMP_MOUNT_KERNEL}/vmlinux.64.md5"`
+echo "Wrote md5sum of kernel: $MD5Sum"
+
+sleep 1
+
+FILESIZE=`ls -nl "${TMP_TAR_OUTPUT}/root" | awk '{print $5}'`
+diskutil quiet unmount "$DATA_PART"
+[ -f "${TMP_TAR_OUTPUT}/root" ] || (echo "Cannot find root file!" exit 1)
+dd if="${TMP_TAR_OUTPUT}/root" | pv --size $FILESIZE -e -N 'Burning Data Partition' | sudo dd of="${DATA_PART}" bs=4096 >/dev/null 2>&1
+
+echo "Ejecting Disk"
+sleep 1
+diskutil quiet umountDisk "$DEVICE"
+cleanupDirs
+
+echo "Finished!"
+exit 0
+
